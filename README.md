@@ -58,6 +58,26 @@ export $(cat .env | xargs)
 Tune `config.py` if you want different EMA lengths, reward:risk, or polling
 frequency.
 
+### Delivery method: direct Telegram vs. your Pipedream bridge
+
+Set `NOTIFY_METHOD` in `.env`:
+
+- `telegram_direct` (default) — this bot calls the Telegram Bot API itself.
+  Simplest, fewest moving parts.
+- `pipedream` — this bot POSTs to `PIPEDREAM_WEBHOOK_URL`, the same Pipedream
+  workflow your Pine Script alerts already bridge through to Telegram. Set
+  `PIPEDREAM_PAYLOAD_FORMAT=text` (default) if that workflow expects a raw
+  text body the way TradingView's `alert()` webhook sends it — this is a
+  drop-in match. Set it to `json` if you'd rather receive structured fields
+  (`side`, `entry`, `stop`, `target`, `rr`, `reasoning`, etc.) and reshape the
+  message inside Pipedream instead.
+- `both` — sends via both paths independently; if one fails the other can
+  still get through.
+
+If your Pipedream workflow expects specific JSON key names that don't match
+`notify.py`'s `_pipedream_json_payload()`, that function is the one place to
+adjust them.
+
 ## 4. Run
 
 ```bash
@@ -100,8 +120,58 @@ docker build -t btc-signal-bot .
 docker run -d --env-file .env --name btc-signal-bot btc-signal-bot
 ```
 
-A cheap VPS (DigitalOcean/Linode/Hetzner, ~$5/mo) with systemd is the most
-"set and forget" option — a laptop that sleeps will miss cycles.
+**Option D — GitHub Actions (no server at all, best for iPad-only setups)**
+
+This runs the bot on GitHub's own machines on a schedule — you never manage a
+server. Everything below can be done from Safari on an iPad using github.com
+directly (no app required), though the GitHub or Working Copy app makes
+editing files a bit easier if you prefer.
+
+1. **Create a repo.** On github.com, tap **New repository**. Public repos get
+   unlimited free Actions minutes; private repos get 2,000 free minutes/month
+   on the Free plan, which is tight at a 5-minute cadence (see note below).
+   Nothing secret lives in the code itself — tokens go in encrypted repo
+   secrets — so a public repo is safe here if you'd rather not think about
+   minute budgets.
+
+2. **Upload all the bot files**, keeping the folder structure, including
+   `.github/workflows/signal-check.yml` and `bot_state.json`. On github.com
+   you can use **Add file → Upload files** and drag them in, or **Add file →
+   Create new file** and type the full path (e.g.
+   `.github/workflows/signal-check.yml`) into the filename box — GitHub
+   creates the folders for you.
+
+3. **Add your config as repo secrets** — Settings → Secrets and variables →
+   Actions → **New repository secret**, one per row:
+
+   | Secret name | Value |
+   |---|---|
+   | `TELEGRAM_BOT_TOKEN` | from BotFather |
+   | `TELEGRAM_CHAT_ID` | from @userinfobot |
+   | `NOTIFY_METHOD` | `telegram_direct` (or `pipedream` / `both`) |
+   | `PIPEDREAM_WEBHOOK_URL` | leave blank if not using Pipedream |
+   | `PIPEDREAM_PAYLOAD_FORMAT` | `text` (or `json`) |
+   | `INSTRUMENT` | `BTCUSD-PERP` |
+   | `RISK_PER_TRADE_PCT` | `1.0` |
+   | `ACCOUNT_BALANCE_USD` | `0` (or your balance) |
+
+   Never commit a real `.env` file to the repo — secrets only, always.
+
+4. **Test it manually** before waiting on the schedule: Actions tab →
+   "BTC Signal Check" workflow → **Run workflow** button. Check the run's
+   logs to confirm it completed and (if a setup exists) that Telegram
+   received the message.
+
+5. It now runs itself on the `*/5 * * * *` cron in
+   `.github/workflows/signal-check.yml` — GitHub queues scheduled runs
+   during busy periods, so treat "every 5 minutes" as "every 5-15 minutes."
+   If you went private and want to stay well under the free-minute budget,
+   change that cron line to `*/15 * * * *`.
+
+State (`bot_state.json`) gets committed back by the workflow after every run
+so it won't re-alert the same setup, and you'll see a small "update signal
+state" commit in the repo's history after each cycle that finds a match —
+that's expected, not an error.
 
 ## Files
 
@@ -111,9 +181,13 @@ A cheap VPS (DigitalOcean/Linode/Hetzner, ~$5/mo) with systemd is the most
 | `crypto_api.py` | Crypto.com public REST client (candles + trades) |
 | `indicators.py` | EMA, ATR, CVD math |
 | `signals.py` | The actual strategy logic |
-| `telegram_notify.py` | Formats and sends the Telegram alert |
+| `telegram_notify.py` | Formats the message + direct Telegram Bot API send |
+| `notify.py` | Dispatches to telegram_direct / pipedream / both |
 | `state.py` | Prevents duplicate alerts |
-| `main.py` | The polling loop |
+| `main.py` | The polling loop (for VPS/systemd/Docker deployments) |
+| `check_once.py` | Single-cycle entrypoint (for GitHub Actions / cron) |
+| `.github/workflows/signal-check.yml` | GitHub Actions schedule (no server needed) |
+| `bot_state.json` | Tracks the last alerted setup — committed back by Actions |
 | `test_signals.py` | Offline sanity tests (no network) — `python test_signals.py` |
 
 ## Known limitations / things to sanity-check yourself
